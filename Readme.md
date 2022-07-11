@@ -143,4 +143,183 @@ color ray_color(const ray& r) {
 在最前面加了一个if判断，也就是在光线与球心在(0,0,-1)半径为-1的球有交点时，该像素点颜色为红色，否则还是之前的渐变蓝色。有一个问题是，还记得之前t的正负值代表光线的正向和反向吗，目前t是有可能为负值的，也就是说哪怕这个球的位置在光线起点的后面，也是会得到交点，我们会在后续修复这个问题。程序没有问题的情况下得到最终效果：<br />
 ![red ball](4.png)
 
-## · 表明的法向和多个物体
+## · 表面的法向和多个物体
+### ·· 根据表面法线进行着色
+对于球心为C的球体，假设球体表面的点为P，则P点处的法线向量应该为P-C。由于目前我们场景中还没有添加任何光线，那我们为了可视化法线的效果，我们根据法线的坐标值设置球体表面像素的rgb颜色。<br />
+之前我们用函数hit_sphere判断光线是否与球体相交，所以函数返回值为bool类型，但是现在我们需要交点P的值了，根据之前我们推导出来的交点坐标公式，可以知道我们能够用t的值来表示交点P的坐标，所以我们当前的目的就是用hit_sphere函数返回t的值，那返回值自然也将改成double类型。为了简化场景，我们假设当前球体是在摄像机的前面，即球心z值为-1，那就不需要考虑t为负值的情况，利用求根公式
+$$x=(-b \pm \sqrt \delta) /2a$$
+我们取t的最小值，也就是光线最先接触到球体的点（后一个接触的点会被遮挡住，不需要渲染，也就是上述求根公式括号内为减号。在ray_color函数中，如果t值大于零，也就是有交点，那我用该点减去球心(0,0,-1)就能得到该点的法向量，进行一个标准化，然后映射到rgb值上去，得到球体的法线可视化效果。
+```
+double hit_sphere(const point3& center, double radius, const ray& r) {
+	vec3 oc = r.origin() - center;
+	auto a = dot(r.direction(), r.direction());
+	auto b = 2.0 * dot(oc, r.direction());
+	auto c = dot(oc, oc) - radius * radius;
+	auto discriminant = b * b - 4 * a * c;
+	if (discriminant < 0) {
+		return -1.0;
+	}
+	else {
+		return (-b - sqrt(discriminant)) / (2.0 * a);
+	}
+}
+
+color ray_color(const ray& r) {
+	auto t = hit_sphere(point3(0, 0, -1), 0.5, r);
+	if (t > 0.0) {
+		vec3 N = unit_vector(r.at(t) - vec3(0, 0, -1));
+		return 0.5 * color(N.x() + 1, N.y() + 1, N.z() + 1);
+
+	}
+
+	vec3 unit_direction = unit_vector(r.direction());
+	t = 0.5 * (unit_direction.y() + 1.0);
+	return (1.0 - t) * color(1.0, 1.0, 1.0) + t * color(0.5, 0.7, 1.0);
+}
+```
+编译成功后运行即可得到法线可视化图片：<br />
+![nomal](5.png)
+
+### ··简化光球相交的函数
+对于求根公式，我们把其中的b替换成2h，相当于h大小为b的一半，带入到求根公式可得
+$$x=(-h \pm \sqrt (h^2-ac))/a$$
+同时，相同向量的点积我们可以替换为这个向量长度的平方，所以hit_sphere可以减少一些计算量：
+```
+double hit_sphere(const point3& center, double radius, const ray& r) {
+	vec3 oc = r.origin() - center;
+	auto a = r.direction().length_squared();
+	auto half_b = dot(oc, r.direction());
+	auto c = oc.length_squared() - radius * radius;
+	auto discriminant = half_b * half_b - a * c;
+	if (discriminant < 0) {
+		return -1.0;
+	}
+	else {
+		return (-half_b - sqrt(discriminant)) / a;
+	}
+}
+```
+### ·· 多个可击中物体的抽象表示
+为了后续能够设计更多可以被光线击中的物体，我们来创建一个可击中的抽象类hittable，它之所以是抽象类是因为它包含了一个纯虚函数hit，结构体hit_record被用来记录被击中的点的信息。
+```
+struct hit_record {
+	point3 p;
+	vec3 normal;
+	double t;
+};
+
+class hittable {
+public:
+	virtual bool hit(const ray& r, double t_min, double t_max, hit_record& rec) const = 0;
+};
+```
+有了抽象类，我们如果想要很多个球体，那我们可以定义一个球体的类，继承hittable，然后重写hit函数来达到我们光线击中球体的效果。在球体类的hit函数中，我们给t值进行一个限制，只有在t<sub>min</sub><=t<=t<sup>max</sup>的时候，我们才考虑这个点为交点。同时我们现在不会默认球在摄像机的前方，所以我们需要求根公式中的+和-号。
+```
+class sphere : public hittable {
+public:
+	sphere() {}
+	sphere(point3 cen, double r) :center(cen), radius(r) {};
+	virtual bool hit(
+		const ray& r, double t_min, double t_max, hit_record& rec) const override;
+
+public:
+	point3 center;
+	double radius;
+};
+
+bool sphere::hit(const ray& r, double t_min, double t_max, hit_record& rec) const { 
+	vec3 oc = r.origin() - center;
+	auto a = r.direction().length_squared();
+	auto half_b = dot(oc, r.direction());
+	auto c = oc.length_squared() - radius * radius;
+
+	auto discriminant = half_b * half_b - a * c;
+	if (discriminant < 0) return false;
+	auto sqrtd = sqrt(discriminant);
+
+	auto root = (-half_b - sqrtd) / a;
+	if (root<t_min || root >t_max) {
+		root = (-half_b + sqrtd) / a;
+		if (root < t_min || t_max < root)
+			return false;
+	}
+
+	rec.t = root;
+	rec.p = r.at(rec.t);
+	rec.normal = (rec.p - center) / radius;
+	return true;
+}
+```
+### ·· 前面vs后面
+我们想象一个场景，我们有一个玻璃球，那我们的光线从球外面照过来和从球心照出去，会产生不一样的着色效果，所以我们需要做的是判断光线的方向和球表面法线方向的关系，我们知道球体表面法线方向就是球心到表面点的方向，所以当光线方向和法线方向相同时，光线就是从球心照到球外，反之则是光线从球外照向球内。我们利用向量的点积，当光线方向点乘法线方向为正时，说明夹角为锐角即光线和法线同向，光线从内部照射出来，为负夹角为钝角，光线从外部照过来。我们修改一下hit_record，让法线永远与光线方向相反。
+```
+struct hit_record {
+	point3 p;
+	vec3 normal;
+	double t;
+	bool front_face;
+
+	inline void set_face_normal(const ray& r, const vec3& outward_normal) {
+		front_face = dot(r.direction(), outward_normal) < 0;
+		normal= front_face ? outward_normal : -outward_normal;
+	}
+};
+```
+然后在球体类的hit函数中设置光线和法线的判断：
+```
+bool sphere::hit(const ray& r, double t_min, double t_max, hit_record& rec) const { 
+	vec3 oc = r.origin() - center;
+	auto a = r.direction().length_squared();
+	auto half_b = dot(oc, r.direction());
+	auto c = oc.length_squared() - radius * radius;
+
+	auto discriminant = half_b * half_b - a * c;
+	if (discriminant < 0) return false;
+	auto sqrtd = sqrt(discriminant);
+
+	auto root = (-half_b - sqrtd) / a;
+	if (root<t_min || root >t_max) {
+		root = (-half_b + sqrtd) / a;
+		if (root < t_min || t_max < root)
+			return false;
+	}
+
+	rec.t = root;
+	rec.p = r.at(rec.t);
+	vec3 outward_normal = (rec.p - center) / radius;
+	rec.set_face_normal(r, outward_normal);
+
+	return true;
+}
+```
+我们修改法向使其永远和光线方向相反的代码可以在着色或者是几何计算阶段进行，由于本项目采用了大量相似的球体，但是材质很多，所以为了减少工作量，我们将其放到几何阶段进行。
+
+### ·· 用C++新特性创建可击中物体的list
+如果我们整个场景有很多个可被光线击中的物体，那最好有一个list来存储所有的物体，所以我们创建了头文件hittable_list来构建这样一个类，它的父类同样是hittable，在hittable_list的hit函数中，有一个循环，存储的所有物体都会被一一计算是否与光线相交，如果相交了，会把对象存储到rec变量中。注意在hit函数中，一旦判断出该物体会与光线相交，则closest_so_far会变为当前物体的t值，这一步就是为了让像素的颜色只显示为光线接触到的最近物体的颜色。我们还用到了C++的新特性shared_ptr，它可以让多个指针指向同一个目标，同时记录指针的数量，只有当这个目标的指针数量为0时，这个对象才会被删除，创建一个shared_ptr的实例可以用make_shared函数，C++会自动优化内存管理。
+```
+bool hittable_list::hit(const ray& r, double t_min, double t_max, hit_record& rec) const {
+	hit_record temp_rec;
+	bool hit_anything = false;
+	auto closest_so_far = t_max;
+
+	for (const auto& object : objects) {
+		if (object->hit(r, t_min, closest_so_far, temp_rec)) {
+			hit_anything = true;
+			closest_so_far = temp_rec.t;
+			rec = temp_rec;
+		}
+	}
+
+	return hit_anything;
+}
+```
+同时为了方便后面的计算，我们把常用的一些变量比如pi和无限大，以及弧度转角度这些方法放到头文件rtweekend.h下。最后我们在main函数中创建一个变量world，类型为hittable_list，其中存了两个球，上下分布，下面的球半径为100，所以会很大，最终渲染出来的效果图如下：<br />
+![两个球](6.png)
+
+## · 抗锯齿
+为了达到一个比较好的渲染效果，本项目使用了100倍的MSAA进行抗锯齿，也就是说我每个像素点会随机分布100个采样点，然后用一百束光线取穿过这些采样点，最终该像素的颜色是这一百个颜色的平均值。C++没有自带的随机函数，所以我们包含了头文件cstdlib，然后将函数random_double写到了头文件rtweekend中以便调用。<br />
+同时我们还构建了摄像机类，最后在main函数中，我们用samples_per_pixels变量定义采样点的多少，按照之前说的设为100，然后渲染过程中每个像素循环一百次计算采样点的颜色，在write_color函数中除以100得到最终的颜色值。编译后生成新的image进行查看，很明显锯齿的情况得到了改善。<br />
+![MSAA](7.png) <br />
+程序运行的时候可以很明显的感觉到生成图片的速度变慢了，毕竟每个像素取了100个采样点，那计算量就增加了一百倍，不过我们这项目也就简单的渲染一帧，没有实时性的要求，所以还是按效果好的方法来吧。
+
+### ·漫反射材质
